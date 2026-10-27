@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>لوحة الإدارة — بلاغ الحملة</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <span class="logo">🏥</span>
+  <div>
+    <h1>لوحة إدارة بلاغ الحملة القومية للتطعيم</h1>
+    <p>رفع شيت اليوم السابق · تجميع البيانات · فحص الأخطاء</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ① رفع شيت اليوم السابق -->
+  <section class="card">
+      <h2><span class="num">1</span> رفع بلاغ اليوم السابق (CSV أو إكسيل)</h2>
+    <p class="msg msg-info">هذا الشيت بياخدوه من الوحدات / الإدارة، وبيُستخدم عشان يحط التراكمي والرصيد أول اليوم للوحدات تلقائياً.</p>
+    <label>اختر ملف .csv أو .xlsx (البلاغ اليومي للإدارة)
+      <input type="file" id="xlsxFile" accept=".xlsx,.xls,.csv">
+    </label>
+    <div id="xlsxMsg" class="msg msg-info">لم يتم رفع أي ملف بعد.</div>
+    <div class="btns">
+      <button id="loadBaselineBtn" class="btn-blue">تحميل بيانات اليوم السابق</button>
+    </div>
+    <p class="tip">بعد الرفع، الوحدات لما تفتح صفحتها هتلاقي البيانات الأساسية والتراكمي معبأة تلقائياً.</p>
+  </section>
+
+  <!-- ①.١ تفاصيل الاستخراج -->
+  <section class="card" id="extractCard" style="display:none;">
+    <h2><span class="num">1.1</span> تفاصيل الاستخراج من البلاغ</h2>
+    <div id="extractSummary" class="msg msg-info"></div>
+    <div class="table-wrap">
+      <table id="extractTbl"></table>
+    </div>
+  </section>
+
+  <!-- ② تجميع البلاغ الحالي -->
+  <section class="card">
+    <h2><span class="num">2</span> تجميع البلاغ الحالي</h2>
+    <div class="grid g2">
+      <label>تاريخ البلاغ الحالي
+        <input type="date" id="curDate">
+      </label>
+      <label>شيت اليوم السابق (مُحمَّل)
+        <input type="text" id="baselineDateOut" readonly value="—">
+      </label>
+    </div>
+    <div id="aggMsg" class="msg msg-info">اختر التاريخ عشان تشوف تجميع الوحدات.</div>
+    <div class="table-wrap">
+      <table id="tbl"></table>
+    </div>
+    <div class="btns">
+      <button id="aggPdfBtn" class="btn-primary">📄 تنزيل التقرير المجمع (PDF)</button>
+    </div>
+    <p class="tip">البيانات تظهر تلقائياً لو الوحدة حفظت بلاغها على نفس الجهاز/المتصفح.</p>
+  </section>
+</main>
+
+<script src="xlsx.full.min.js"></script>
+<script src="common.js"></script>
+<script src="pdf.js"></script>
+<script>
+/* ===== رفع البلاغ اليومي (CSV أو XLSX) ===== */
+let parsedBaseline = null;
+
+/* تحليل نص CSV إلى صفوف */
+function parseCsvText(text){
+  const rows=[]; let row=[]; let field=''; let inQ=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(inQ){
+      if(c==='"'){ if(text[i+1]==='"'){ field+='"'; i++; } else inQ=false; }
+      else field+=c;
+    } else {
+      if(c==='"') inQ=true;
+      else if(c===','){ row.push(field); field=''; }
+      else if(c==='\n'||c==='\r'){
+        if(c==='\r'&&text[i+1]==='\n') i++;
+        row.push(field); field=''; rows.push(row); row=[];
+      } else field+=c;
+    }
+  }
+  if(field!==''||row.length>0){ row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* تحويل قيمة للرقم (يتعامل مع #DIV/0! والنسبة) */
+function cv(x){
+  if(x===null||x===undefined) return NaN;
+  const s=String(x).replace('%','').replace('#DIV/0!','0').replace('\ufeff','').trim();
+  if(s==='') return NaN;
+  const n=Number(s);
+  return isNaN(n)?NaN:n;
+}
+
+/* ===== خريطة أعمدة قالب «البلاغ اليومي للادارة» (62 عمود) =====
+   0=م · 1=اسم الوحدة · 2=المستهدف · 3=عدد الفرق
+   4/5=م9أ(اليوم/حتى) 6/7=م5أ 8/9=م5-10 · 10/11=ن9أ 12/13=ن5أ 14/15=ن5-10
+   16/17=الإجمالي(اليوم/حتى) · 18=النسبة
+   19/20=المتغيبين · 21/22=المطعمين من المتغيبين · 23/24=الآثار الجانبية
+   27=م · 28=اسم الوحدة · 29=الرصيد أول اليوم · 30/31=الوارد(اليوم/حتى)
+   32/33=المستهلك(اليوم/حتى) · 34=المتبقي · 35=معدل اليوم · 36=معدل حتى اليوم
+   48=اسم الوحدة · 49=عدد المدارس 50=المستهدف 51=زارت حتى اليوم 52=متطعمين اليوم 53=متطعمين حتى اليوم 54=النسبة
+   55=عدد الحضانات 56=المستهدف 57=زارت 58=متطعمين اليوم 59=متطعمين حتى اليوم 60=النسبة */
+const COLS = {
+  name:1, target:2, teams:3,
+  e0:[5,4], e1:[7,6], e2:[9,8], n0:[11,10], n1:[13,12], n2:[15,14],
+  totC:17, totT:16, pct:18,
+  abs:[20,19], absv:[22,21], side:[24,23],
+  open:29, recv:[31,30], used:[33,32], remaining:34, rateT:35, rateC:36,
+  schTotal:49, schTarget:50, schVisited:51, schVaccT:52, schVacc:53, schPct:54,
+  nurTotal:55, nurTarget:56, nurVisited:57, nurVaccT:58, nurVacc:59, nurPct:60
+};
+
+/* تحليل صفوف البلاغ (نفس النموذج) — بيشتغل مع CSV ومع XLSX بنفس الكود */
+function parseRows(rows){
+  rows = rows || [];
+  // 1) نلاقي صف العناوين اللي فيه «اسم الوحدة»
+  let hdr=-1;
+  for(let i=0;i<Math.min(rows.length,40);i++){
+    const r=rows[i]||[];
+    if(r.some(c=>String(c==null?"":c).includes("اسم الوحدة"))){ hdr=i; break; }
+  }
+  if(hdr<0) return {units:{}, unmatched:[], error:"مافيش شريط أسماء الوحدات في الشيت"};
+
+  // 2) عمود اسم الوحدة = أول خانة فيها «اسم الوحدة» (غالبًا العمود 1)
+  //    ملاحظة: نفس الصف فيه «اسم الوحدة» تاني في أقسام الزجاجات والمدارس — لازم ناخد الأول بس
+  let nameCol=COLS.name;
+  for(let i=0;i<(rows[hdr]||[]).length;i++){
+    if(String(rows[hdr][i]==null?"":rows[hdr][i]).includes("اسم الوحدة")){ nameCol=i; break; }
+  }
+
+  const off = nameCol - COLS.name;            // إزاحة لو عمود الاسم اتحرك
+
+  const units={}, unmatched=[], rowsInfo=[];
+  let started=false;
+  for(let i=hdr+1;i<rows.length;i++){
+    const r=rows[i]||[];
+    const rawName=String(r[nameCol]==null?"":r[nameCol]).replace(/\ufeff/g,'').trim();
+    if(!rawName || /^\d+$/.test(rawName)){ if(started) break; else continue; }
+    if(rawName.includes("الاجمالي")||rawName.includes("الإجمالي")) break;
+    started=true;
+    const u={ __name:rawName, __row:i+1 };
+    u.target=cv(r[COLS.target+off]); u.teams=cv(r[COLS.teams+off])||1;
+    u.e0_t=cv(r[COLS.e0[1]+off])||0; u.e0=cv(r[COLS.e0[0]+off])||0;
+    u.e1_t=cv(r[COLS.e1[1]+off])||0; u.e1=cv(r[COLS.e1[0]+off])||0;
+    u.e2_t=cv(r[COLS.e2[1]+off])||0; u.e2=cv(r[COLS.e2[0]+off])||0;
+    u.n0_t=cv(r[COLS.n0[1]+off])||0; u.n0=cv(r[COLS.n0[0]+off])||0;
+    u.n1_t=cv(r[COLS.n1[1]+off])||0; u.n1=cv(r[COLS.n1[0]+off])||0;
+    u.n2_t=cv(r[COLS.n2[1]+off])||0; u.n2=cv(r[COLS.n2[0]+off])||0;
+    u.totT=cv(r[COLS.totT+off])||0; u.totC=cv(r[COLS.totC+off])||0; u.pct=String(r[COLS.pct+off]||'').trim();
+    u.abs_t=cv(r[COLS.abs[1]+off])||0; u.abs=cv(r[COLS.abs[0]+off])||0;
+    u.absv_t=cv(r[COLS.absv[1]+off])||0; u.absv=cv(r[COLS.absv[0]+off])||0;
+    u.side_t=cv(r[COLS.side[1]+off])||0; u.side=cv(r[COLS.side[0]+off])||0;
+    u.open_prev=cv(r[COLS.open+off])||0;
+    u.recv_t=cv(r[COLS.recv[1]+off])||0; u.recvC=cv(r[COLS.recv[0]+off])||0;
+    u.used_t=cv(r[COLS.used[1]+off])||0; u.usedC=cv(r[COLS.used[0]+off])||0;
+    u.recv=u.recv_t; u.used=u.used_t;           // «اليوم» (مش التراكمي)
+    u.remaining=cv(r[COLS.remaining+off])||0;
+    u.rate_t=String(r[COLS.rateT+off]==null?'':r[COLS.rateT+off]).trim();
+    u.rate_c=String(r[COLS.rateC+off]==null?'':r[COLS.rateC+off]).trim();
+    u.schTotal=cv(r[COLS.schTotal+off])||0; u.schTarget=cv(r[COLS.schTarget+off])||0;
+    u.schVisited=cv(r[COLS.schVisited+off])||0; u.schVaccT=cv(r[COLS.schVaccT+off])||0; u.schVacc=cv(r[COLS.schVacc+off])||0;
+    u.schPct=String(r[COLS.schPct+off]||'').trim();
+    u.nurTotal=cv(r[COLS.nurTotal+off])||0; u.nurTarget=cv(r[COLS.nurTarget+off])||0;
+    u.nurVisited=cv(r[COLS.nurVisited+off])||0; u.nurVaccT=cv(r[COLS.nurVaccT+off])||0; u.nurVacc=cv(r[COLS.nurVacc+off])||0;
+    u.nurPct=String(r[COLS.nurPct+off]||'').trim();
+    u.open=u.remaining;                         // رصيد أول اليوم لبكرة = المتبقي النهاردة
+
+    const canon=matchUnitName(rawName);
+    if(canon){ u.__canon=canon; units[canon]=u; }
+    else     { unmatched.push(rawName); units[rawName]=u; }
+    rowsInfo.push(u.__row);
+  }
+  return { units, unmatched, sheetDate: sheetDateFrom(rows, hdr),
+           firstRow:rowsInfo[0]||0, lastRow:rowsInfo[rowsInfo.length-1]||0 };
+}
+
+/* توافق: استدعاء قديم للـ CSV */
+function parseDailyCsv(text){
+  return parseRows(parseCsvText(text));
+}
+
+/* محاولة قراءة تاريخ البلاغ من رأس الشيت (التاريخ / 26/10/2026) */
+function sheetDateFrom(rows, beforeRow){
+  const lim = beforeRow>0 ? beforeRow : rows.length;
+  for(let i=0;i<lim;i++){
+    const r=rows[i]||[];
+    for(const cell of r){
+      const s=String(cell==null?"":cell);
+      const m=s.match(/التاريخ\s*\/?\s*(\d{1,2})\s*[\/\-]\s*(\d{1,2})\s*[\/\-]\s*(\d{4})/);
+      if(m){
+        const d=+m[1], mo=+m[2], y=+m[3];
+        if(d>=1&&d<=31&&mo>=1&&mo<=12) return y+"-"+String(mo).padStart(2,"0")+"-"+String(d).padStart(2,"0");
+      }
+    }
+  }
+  return "";
+}
+
+async function handleFile(e){
+  const f=e.target.files[0];
+  if(!f) return;
+  try{
+    let pb;
+    if(f.name.toLowerCase().endsWith('.csv')){
+      const text=await f.text();
+      pb=parseDailyCsv(text);
+    } else {
+      const buf=await f.arrayBuffer();
+      const wb=XLSX.read(buf,{type:"array"});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:""});
+      pb=parseRows(rows);
+    }
+    // تاريخ «اليوم السابق»: من الشيت لو مكتوب، وإلا (تاريخ البلاغ − 1)
+    const fallback=prevDateStr($("curDate").value||todayLocal());
+    parsedBaseline={ date: pb.sheetDate || fallback,
+                     units: pb.units||{}, unmatched: pb.unmatched||[], error: pb.error||"",
+                     sheetDate: pb.sheetDate||"", fallbackDate: fallback,
+                     firstRow: pb.firstRow||0, lastRow: pb.lastRow||0 };
+    showBaselineMsg(parsedBaseline);
+  }catch(err){
+    $("xlsxMsg").className="msg msg-bad";
+    $("xlsxMsg").textContent="✗ تعذر قراءة الملف: "+err.message;
+  }
+  e.target.value="";
+}
+
+/* (numv موحّدة في common.js — بتشيل الفواصل والـ% وتتعامل مع #DIV/0!) */
+
+function showBaselineMsg(b){
+  if(b.error){
+    $("xlsxMsg").className="msg msg-bad";
+    $("xlsxMsg").textContent="✗ "+b.error+". تأكد من شكل البلاغ (بيكون فيه الوحدات والبيانات).";
+    $("extractCard").style.display="none";
+    return;
+  }
+  const n=Object.keys(b.units).length;
+  const unmatched=b.unmatched||[];
+  const missing=UNITS.filter(u=>!b.units[u]);
+  if(unmatched.length||missing.length){
+    $("xlsxMsg").className="msg msg-warn";
+    $("xlsxMsg").textContent=`⚠️ تم استخراج ${n} وحدة، بس فيه ${unmatched.length} اسم في الشيت مش متطابق مع قائمة الوحدات`+
+      (unmatched.length?` (${unmatched.slice(0,3).join('، ')}${unmatched.length>3?'…':''})`:"")+
+      ` — و${missing.length} وحدة من القائمة ملهاش بيانات في الشيت. شوف الجدول تحت.`;
+  }else{
+    $("xlsxMsg").className="msg msg-ok";
+    $("xlsxMsg").textContent=`✅ تم استخراج بيانات ${n} وحدة وكل الأسماء اتطابقت مع قائمة الوحدات (${n}/${UNITS.length})`+
+      (b.date?` — تاريخ الشيت: ${b.date}`:"")+`. اضغط «تحميل بيانات اليوم السابق».`;
+  }
+  showExtractDetails(b);
+}
+
+/* تفاصيل الاستخراج — جدول بكل الوحدات والقيم اللي هتتسكن في صفحة الوحدة */
+function showExtractDetails(b){
+  const card=$("extractCard");
+  card.style.display="";
+  const units=b.units||{};
+  const names=Object.keys(units);
+  const n=names.length;
+  const unmatched=b.unmatched||[];
+
+  // هل البيانات من CSV (فيها rate_t) ولا من إكسيل؟
+  const u0=units[names[0]]||{};
+  const isCsv = u0.rate_t !== undefined;
+
+  let okCount=0, errCount=0;
+  names.forEach(name=>{
+    const u=units[name]; let prob=false;
+    if(isCsv){
+      const rt=parseFloat(u.rate_t), rc=parseFloat(u.rate_c);
+      if(isFinite(rt)&&(rt<9||rt>10)) prob=true;
+      if(isFinite(rc)&&(rc<9||rc>10)) prob=true;
+    }
+    if(!(u.target>0)) prob=true;
+    if(prob) errCount++; else okCount++;
+  });
+
+  $("extractSummary").className = (errCount>0||unmatched.length>0) ? "msg msg-warn" : "msg msg-ok";
+  $("extractSummary").innerHTML =
+    `استخراج <b>${n}</b> وحدة من أصل <b>${UNITS.length}</b> · <span class="cell-ok">${okCount} جاهزة</span>`+
+    (errCount?` · <span class="cell-bad">${errCount} فيها تحذير</span>`:"")+
+    (unmatched.length?` · <b>${unmatched.length} اسم غير متطابق: ${unmatched.join('، ')}</b>`:"")+
+    `<br><span style="font-weight:normal">الأعمدة دي هي بالظبط اللي هتتعبأ في صفحة الوحدة (الرصيد أول اليوم = «المتبقي» في الشيت، والتراكمي = عمود «حتى اليوم»).</span>`;
+
+  let html='<thead><tr>'+
+    '<th>#</th><th>الوحدة</th><th>يوم في الشيت</th><th>صف</th>'+
+    '<th>المستهدف</th><th>الفرق</th><th>الرصيد أول اليوم</th><th>تراكمي المتطعمين</th>'+
+    '<th>مدارس كلي</th><th>مستهدف المدارس</th><th>متطعمين المدارس حتى اليوم</th>'+
+    '<th>حضانات كلي</th><th>مستهدف الحضانات</th><th>متطعمين الحضانات حتى اليوم</th>'+
+    '<th>معدل الزجاجة (اليوم / حتى)</th><th>الحالة</th></tr></thead><tbody>';
+
+  names.forEach((name,i)=>{
+    const u=units[name];
+    let msgs=[], prob=false;
+    if(isCsv){
+      const rt=parseFloat(u.rate_t), rc=parseFloat(u.rate_c);
+      if(isFinite(rt)&&(rt<9||rt>10)){ prob=true; msgs.push(`معدل اليوم ${rt}`); }
+      if(isFinite(rc)&&(rc<9||rc>10)){ prob=true; msgs.push(`معدل التراكمي ${rc}`); }
+    }
+    if(!(u.target>0)){ prob=true; msgs.push("المستهدف صفر"); }
+    const notMatched = !UNITS.includes(name);
+    if(notMatched){ prob=true; msgs.push("الاسم غير مطابق"); }
+    const status = prob ? "✗ "+msgs.join(" / ") : "✓ سليم";
+    const cls = prob ? "cell-bad" : "cell-ok";
+    const cum = (u.e0||0)+(u.e1||0)+(u.e2||0)+(u.n0||0)+(u.n1||0)+(u.n2||0);
+    const shownName = UNITS.includes(name) ? name : `<span class="cell-bad">${name}</span>`;
+    const rawName = (u.__name && u.__name!==name) ? u.__name : "—";
+    html+=`<tr><td>${i+1}</td><td>${shownName}</td><td>${rawName}</td><td>${u.__row||"—"}</td>`+
+      `<td>${fmt(u.target||0)}</td><td>${u.teams||1}</td><td>${fmt(u.open||0)}</td><td>${fmt(cum)}</td>`+
+      `<td>${fmt(u.schTotal||0)}</td><td>${fmt(u.schTarget||0)}</td><td>${fmt(u.schVacc||0)}</td>`+
+      `<td>${fmt(u.nurTotal||0)}</td><td>${fmt(u.nurTarget||0)}</td><td>${fmt(u.nurVacc||0)}</td>`+
+      `<td>${isCsv?(u.rate_t?Number(u.rate_t).toFixed(2):"—")+" / "+(u.rate_c?Number(u.rate_c).toFixed(2):"—"):"—"}</td>`+
+      `<td class="${cls}">${status}</td></tr>`;
+  });
+  html+="</tbody>";
+  $("extractTbl").innerHTML=html;
+}
+
+function loadBaseline(){
+  if(!parsedBaseline || !parsedBaseline.units){
+    alert("مافيش بيانات مُلحَمة للتحميل. ارفع البلاغ (CSV أو XLSX) أولاً.");
+    return;
+  }
+  const expected = prevDateStr($("curDate").value || todayLocal());
+  if(!parsedBaseline.date) parsedBaseline.date = expected;
+  setBaseline(parsedBaseline);
+  $("baselineDateOut").value = parsedBaseline.date;
+  const n=Object.keys(parsedBaseline.units).length;
+  const unmatched=parsedBaseline.unmatched||[];
+  const missing=UNITS.filter(u=>!parsedBaseline.units[u]);
+  const dateWarn = parsedBaseline.date!==expected
+      ? ` ⚠️ تاريخ الشيت (${parsedBaseline.date}) مش يوم قبل تاريخ البلاغ الحالي (${expected}).`
+      : "";
+  if(unmatched.length||missing.length){
+    $("xlsxMsg").className="msg msg-warn";
+    $("xlsxMsg").textContent=`⚠️ اتحفظت بيانات ${n} وحدة بتاريخ ${parsedBaseline.date}.`+
+      (unmatched.length?` أسماء غير متطابقة: ${unmatched.join('، ')}.`:"")+
+      (missing.length?` وحدات بدون بيانات: ${missing.join('، ')}.`:"")+dateWarn;
+  }else{
+    $("xlsxMsg").className="msg msg-ok";
+    $("xlsxMsg").textContent=`✅ تم حفظ بيانات اليوم السابق (${parsedBaseline.date}) لـ ${n} وحدة، وكل الأسماء مطابقة.`+dateWarn;
+  }
+  renderAgg();
+}
+
+/* ===== تجميع البلاغ الحالي ===== */
+function renderAgg(){
+  const date=$("curDate").value;
+  if(!date){ $("aggMsg").className="msg msg-info"; $("aggMsg").textContent="اختر التاريخ عشان تشوف تجميع الوحدات."; $("tbl").innerHTML=""; return; }
+
+  const b=getBaseline();
+  const rows=[]; let saved=0, missing=[]; let totT=0, totC=0, used=0, recv=0, open=0, schV=0, nurV=0;
+  UNITS.forEach((u,i)=>{
+    const s=getUnitSaved(u,date);
+    if(s){
+      saved++;
+      totT+=s.values.totT||0; totC+=s.values.totC||0;
+      used+=s.values.used||0; recv+=s.values.recv||0;
+      open+=s.values.open||0;
+      schV+=s.values.schVisited||0; nurV+=s.values.nurVisited||0;
+      rows.push(`<tr class="ok"><td>${i+1}</td><td>${u}</td><td>✅ محفوظ</td><td class="num">${fmt(s.values.totT||0)}</td><td class="num">${fmt(s.values.totC||0)}</td><td class="num">${fmt(s.values.remaining||0)}</td></tr>`);
+    } else {
+      missing.push(u);
+      rows.push(`<tr class="miss"><td>${i+1}</td><td>${u}</td><td>⏳ لم يُحفظ</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>`);
+    }
+  });
+  $("aggMsg").className = missing.length===0 ? "msg msg-ok" : "msg msg-warn";
+  $("aggMsg").textContent = missing.length===0
+    ? `✅ كل الوحدات محفوظة (${saved}/${UNITS.length}).`
+    : `⏳ محفوظ: ${saved} من ${UNITS.length} — لم يحفظ: ${missing.length}.`;
+  $("tbl").innerHTML = `<thead><tr><th>#</th><th>الوحدة</th><th>الحالة</th><th>متطعم اليوم</th><th>حتى اليوم</th><th>الزجاجات المتبقية</th></tr></thead><tbody>${rows.join("")}<tr class="tot"><td colspan="3">الإجمالي</td><td class="num">${fmt(totT)}</td><td class="num">${fmt(totC)}</td><td class="num">${fmt(open+recv-used)}</td></tr></tbody>`;
+}
+
+function aggPdf(){
+  const date=$("curDate").value;
+  if(!date){ alert("اختر التاريخ أولاً."); return; }
+  const b=getBaseline();
+  const out=[];
+  out.push({unit:"إدارة قويسنا الصحية — التقرير المجمع", date, day:""});
+  // صفحات بسيطة لكل وحدة
+  // (نستخدم نفس renderUnitReport لو فيه بيانات، لكن هنا نعمل ملخص)
+  const rows=[];
+  UNITS.forEach((u,i)=>{
+    const s=getUnitSaved(u,date);
+    rows.push({n:i+1,u, s});
+  });
+  // بناء جدول بسيط على canvas
+  const W=1654,H=2339,M=70;
+  const ctx=document.createElement("canvas"); ctx.width=W; ctx.height=H;
+  const c=ctx.getContext("2d"); c.direction="rtl";
+  c.fillStyle="#fff"; c.fillRect(0,0,W,H);
+  c.fillStyle="#1a56b0"; c.fillRect(0,0,W,58);
+  c.fillStyle="#fff"; c.textAlign="right"; c.font="bold 26px Tahoma, Arial, sans-serif";
+  c.fillText("إدارة قويسنا الصحية — التقرير المجمع للبلاغ اليومي", W-30, 38);
+  c.font="17px Tahoma, Arial, sans-serif";
+  c.fillText(`تاريخ البلاغ: ${date}`, W-30, 52);
+  let y=90;
+  c.fillStyle="#1a3b6e"; c.fillRect(M,y,W-M*2,44); c.fillStyle="#fff"; c.font="bold 20px Tahoma, Arial, sans-serif";
+  c.fillText("بيان الوحدات", W-M-20, y+29); y+=44;
+  const headers=["#","الوحدة","الحالة","متطعم اليوم","حتى اليوم","الزجاجات المتبقية"];
+  const ratios=[0.08,0.28,0.14,0.14,0.14,0.22];
+  // header
+  c.fillStyle="#dce5f2"; c.fillRect(M,y,W-M*2,44); c.strokeStyle="#b8c7e0"; c.strokeRect(M,y,W-M*2,44);
+  let rR=W-M;
+  headers.forEach((h,i)=>{ const cw=(W-M*2)*ratios[i]; const cx=rR-cw; c.strokeRect(cx,y,cw,44); c.fillStyle="#112"; c.textAlign="center"; c.font="bold 15px Tahoma, Arial, sans-serif"; c.fillText(h, cx+cw/2, y+29); rR-=cw; });
+  y+=44;
+  rows.forEach(r=>{
+    const st=r.s?"✅ محفوظ":"⏳ لم يُحفظ";
+    const vals=[r.n, r.u, st, r.s?fmt(r.s.values.totT||0):"—", r.s?fmt(r.s.values.totC||0):"—", r.s?fmt(r.s.values.remaining||0):"—"];
+    c.fillStyle="rgba(255,248,225,0.5)"; c.fillRect(M,y,W-M*2,40);
+    let cR=W-M;
+    vals.forEach((v,ci)=>{ const cw=(W-M*2)*ratios[ci]; const cx=cR-cw; c.strokeStyle="#cbd4e2"; c.strokeRect(cx,y,cw,40); c.fillStyle="#222"; c.font=(ci===0)?"bold 15px Tahoma, Arial, sans-serif":"15px Tahoma, Arial, sans-serif"; c.textAlign=(ci===0||ci===1)?(ci===0?"center":"right"):"center"; c.fillText(String(v), ci===1?cR-12:cx+cw/2, y+27); cR-=cw; });
+    y+=40;
+  });
+  const pages=[{dataUrl:ctx.canvas.toDataURL("image/jpeg",0.94), w:W, h:H}];
+  const blob=jpegsToPdfBlob(pages, 595.28, 841.89);
+  triggerDownload(blob, `تجميع-البلاغ-${date}.pdf`);
+}
+
+/* الأحداث */
+$("xlsxFile").addEventListener("change", handleFile);
+$("loadBaselineBtn").addEventListener("click", loadBaseline);
+$("curDate").addEventListener("change", renderAgg);
+$("aggPdfBtn").addEventListener("click", aggPdf);
+$("curDate").value=todayLocal();
+$("baselineDateOut").value = baselineDate() || "—";
+renderAgg();
+</script>
+</body>
+</html>
